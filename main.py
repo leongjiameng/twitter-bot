@@ -77,9 +77,10 @@ INDEX_HTML = """<!doctype html>
 
   <div class="card">
     <div class="row">
-      <button onclick="location.href='/authorize'">Authorize / Re-authorize</button>
-      <button onclick="fetch('/token', {method:'GET'}).then(r=>r.json()).then(j=>out(JSON.stringify(j,null,2)))">Show stored token</button>
-      <button onclick="fetch('/logout', {method:'POST'}).then(()=>out('Cleared token'))">Clear token</button>
+        <button onclick="location.href='/authorize'">Authorize / Re-authorize</button>
+        <button onclick="refreshToken()">Refresh access token</button>
+        <button onclick="fetch('/token', {method:'GET'}).then(r=>r.json()).then(j=>out(JSON.stringify(j,null,2)))">Show stored token</button>
+        <button onclick="fetch('/logout', {method:'POST'}).then(()=>out('Cleared token'))">Clear token</button>
     </div>
     <div class="row hint">
       Tip: Once authorized, the app will auto-refresh access tokens using refresh_token.
@@ -137,6 +138,11 @@ async function postMedia(){
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({text, image_url})
   });
+  out(await res.text());
+}
+
+async function refreshToken(){
+  const res = await fetch('/refresh', { method: 'POST' });
   out(await res.text());
 }
 </script>
@@ -494,6 +500,38 @@ def show_token():
             safe["refresh_token"] = "***REDACTED***"
     return jsonify({"stored": True, "token": safe})
 
+@app.post("/refresh")
+def force_refresh():
+    tok = load_token()
+    if not tok or not tok.get("refresh_token"):
+        return jsonify({"error": "No refresh_token stored. Click Authorize first."}), 400
+
+    try:
+        new_token = refresh_access_token(tok["refresh_token"])
+        # keep refresh_token if server didn’t return a new one
+        if "refresh_token" not in new_token:
+            new_token["refresh_token"] = tok["refresh_token"]
+        save_token(new_token)
+    except requests.HTTPError as e:
+        resp = e.response
+        return jsonify({
+            "error": "token_refresh_failed",
+            "status": resp.status_code if resp is not None else None,
+            "headers": dict(resp.headers) if resp is not None else None,
+            "body": safe_json(resp) if resp is not None else None,
+        }), 400
+    except Exception as e:
+        return jsonify({"error": "token_refresh_failed", "message": str(e)}), 400
+
+    # redact for UI unless PRINT_SECRETS=1
+    safe = dict(new_token)
+    if not PRINT_SECRETS:
+        if "access_token" in safe:
+            safe["access_token"] = "***REDACTED***"
+        if "refresh_token" in safe:
+            safe["refresh_token"] = "***REDACTED***"
+
+    return jsonify({"ok": True, "token": safe})
 
 @app.post("/logout")
 def logout():

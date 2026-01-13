@@ -97,6 +97,7 @@ A Flask-based web application that allows you to authenticate with X (formerly T
 5. **Manage Tokens**
 
    - Click "Show stored token" to view current access token
+   - Click "Refresh access token" to refresh the access token
    - Click "Clear token" to logout and remove stored credentials
 
 ## API Endpoints
@@ -105,6 +106,7 @@ A Flask-based web application that allows you to authenticate with X (formerly T
 - `GET /authorize` - Start OAuth2 authorization flow
 - `GET /callback` - OAuth2 callback endpoint (handled automatically)
 - `GET /token` - Retrieve stored token (JSON)
+- `POST /refresh` - Force refresh access token
 - `POST /logout` - Clear stored token
 - `POST /tweet` - Post a text tweet
   - Body: `{"text": "your tweet text"}`
