@@ -20,23 +20,25 @@ A Flask-based web application that allows you to authenticate with X (formerly T
 ## Installation
 
 1. **Clone the repository**
+
    ```bash
    git clone <repository-url>
    cd twitter-bot
    ```
-
 2. **Create a virtual environment**
+
    ```bash
    python -m venv venv
    source venv/bin/activate  # On Windows: venv\Scripts\activate
    ```
-
 3. **Install dependencies**
+
    ```bash
    pip install flask python-dotenv requests
    ```
 
    Optional: For Redis token storage support
+
    ```bash
    pip install redis
    ```
@@ -50,16 +52,16 @@ A Flask-based web application that allows you to authenticate with X (formerly T
    CLIENT_SECRET=your_x_api_client_secret
    REDIRECT_URI=http://localhost:5000/callback
    FLASK_SECRET_KEY=your-secret-key-for-sessions
-   
+
    # Optional: For production token storage
    REDIS_URL_DOGS=redis://your-redis-url
    TOKEN_FILE=token.json  # Default local file for storing tokens
-   
+
    # Optional: Set to "1" to print secrets in logs (dev only)
    PRINT_SECRETS=0
    ```
-
 2. **Get X API Credentials**:
+
    - Go to [X Developer Portal](https://developer.twitter.com/)
    - Create an app and generate OAuth2 credentials
    - Set the Redirect URI to match your `REDIRECT_URI` environment variable
@@ -73,26 +75,27 @@ A Flask-based web application that allows you to authenticate with X (formerly T
 ## Usage
 
 1. **Start the Flask server**
+
    ```bash
    python main.py
    ```
-
 2. **Open in browser**
+
    ```
    http://localhost:5000
    ```
-
 3. **Authorize the app**
+
    - Click "Authorize / Re-authorize" button
    - Login with your X account
    - Grant permissions when prompted
    - The app will store your token for future use
-
 4. **Post Tweets**
+
    - **Text Only**: Enter your tweet text and click "Post Tweet"
    - **With Media**: Paste image URL(s) (comma-separated for multiple), add caption, and click "Upload + Tweet"
-
 5. **Manage Tokens**
+
    - Click "Show stored token" to view current access token
    - Click "Clear token" to logout and remove stored credentials
 
@@ -127,6 +130,7 @@ Tokens are automatically refreshed using the refresh token, keeping you logged i
 ## Development
 
 For development with printed secrets (useful for debugging):
+
 ```env
 PRINT_SECRETS=1
 ```
@@ -143,22 +147,5 @@ twitter-bot/
 ├── .gitignore        # Git ignore rules
 └── README.md         # This file
 ```
-
-## Contributing
-
-1. Create a feature branch
-2. Make your changes
-3. Test thoroughly with the web UI
-4. Submit a pull request
-
-## License
-
-[Add your license here]
-
-## Support
-
-For issues with the X API, refer to [X API Documentation](https://developer.twitter.com/en/docs/twitter-api)
-
----
 
 **Note**: Keep your `CLIENT_ID`, `CLIENT_SECRET`, and tokens secure. Never commit `.env` files or `token.json` to version control.
