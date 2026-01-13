@@ -488,7 +488,7 @@ def _guess_media_type(content_type: str, url: str) -> str:
 
     return "image/jpeg"
 
-
+# pylint: disable=too-many-locals
 def upload_image_from_url_v2(image_url: str, access_token: str) -> str:
     """Upload an image (by URL) using X API v2 chunked media upload."""
     dl = requests.get(image_url, timeout=30)
