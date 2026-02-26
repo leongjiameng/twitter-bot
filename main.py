@@ -33,7 +33,6 @@ except ImportError:
 # Load env vars from .env (if present)
 load_dotenv()
 
-
 # =========================
 # Config
 # =========================
@@ -83,11 +82,25 @@ INDEX_HTML = """<!doctype html>
   <style>
     body { font-family: -apple-system, system-ui, Arial; margin: 24px; }
     .row { margin: 12px 0; }
-    input, textarea { width: 100%; padding: 10px; font-size: 14px; }
+    input, textarea { width: 100%; padding: 10px; font-size: 14px; box-sizing: border-box; }
     button { padding: 10px 14px; font-size: 14px; cursor: pointer; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
     .card { border: 1px solid #ddd; border-radius: 10px; padding: 14px; margin: 16px 0; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
     .hint { color: #666; font-size: 12px; }
+
+    .statusbar { display:flex; align-items:center; gap:10px; margin: 10px 0 12px; }
+    .spinner {
+      width: 16px; height: 16px; border-radius: 50%;
+      border: 2px solid #ddd; border-top-color: #333;
+      animation: spin 0.8s linear infinite;
+      display: none;
+      flex: 0 0 auto;
+    }
+    .spinner.on { display: inline-block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .status { min-height: 16px; }
   </style>
 </head>
 <body>
@@ -134,6 +147,13 @@ INDEX_HTML = """<!doctype html>
 
   <div class="card">
     <h3>Output</h3>
+
+    <!-- FIX: these were missing, causing JS errors -->
+    <div class="statusbar">
+      <div id="spinner" class="spinner"></div>
+      <div id="status" class="hint status"></div>
+    </div>
+
     <div id="out" class="mono"></div>
   </div>
 
@@ -142,20 +162,27 @@ function out(t){
   document.getElementById('out').textContent = t;
 }
 
+function setLoading(isLoading, message){
+  const spinner = document.getElementById('spinner');
+  const status = document.getElementById('status');
+
+  if (spinner) spinner.classList.toggle('on', !!isLoading);
+  if (status) status.textContent = isLoading ? (message || 'Working...') : '';
+
+  // Disable all buttons while loading
+  document.querySelectorAll('button').forEach(b => b.disabled = !!isLoading);
+}
+
 async function readBodyPretty(res){
   const contentType = (res.headers.get('content-type') || '').toLowerCase();
 
-  // Prefer JSON pretty print if server returns JSON
   if (contentType.includes('application/json')) {
     try {
       const j = await res.json();
       return JSON.stringify(j, null, 2);
-    } catch (e) {
-      // fall through to text
-    }
+    } catch (e) { /* fall through */ }
   }
 
-  // Fallback: try parse text as JSON anyway
   const text = await res.text();
   try {
     const j = JSON.parse(text);
@@ -165,40 +192,55 @@ async function readBodyPretty(res){
   }
 }
 
+async function run(actionName, fn){
+  try{
+    setLoading(true, actionName);
+    const res = await fn();
+    const body = await readBodyPretty(res);
+
+    // Always output body; if non-2xx, show status too
+    if (!res.ok) {
+      out(body || ('Request failed with HTTP ' + res.status));
+      return;
+    }
+
+    out(body || 'OK');
+  } catch (e) {
+    out(String(e && e.stack ? e.stack : e));
+  } finally {
+    setLoading(false);
+  }
+}
+
 async function showToken(){
-  const res = await fetch('/token', { method: 'GET' });
-  out(await readBodyPretty(res));
+  return run('Fetching token...', () => fetch('/token', { method: 'GET' }));
 }
 
 async function clearToken(){
-  const res = await fetch('/logout', { method: 'POST' });
-  out(await readBodyPretty(res));
+  return run('Clearing token...', () => fetch('/logout', { method: 'POST' }));
 }
 
 async function postText(){
   const text = document.getElementById('text').value;
-  const res = await fetch('/tweet', {
+  return run('Posting tweet...', () => fetch('/tweet', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({text})
-  });
-  out(await readBodyPretty(res));
+  }));
 }
 
 async function postMedia(){
   const text = document.getElementById('media_text').value;
   const image_url = document.getElementById('image_url').value;
-  const res = await fetch('/tweet-media', {
+  return run('Uploading media + posting tweet...', () => fetch('/tweet-media', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({text, image_url})
-  });
-  out(await readBodyPretty(res));
+  }));
 }
 
 async function refreshToken(){
-  const res = await fetch('/refresh', { method: 'POST' });
-  out(await readBodyPretty(res));
+  return run('Refreshing access token...', () => fetch('/refresh', { method: 'POST' }));
 }
 </script>
 </body>
@@ -488,7 +530,7 @@ def _guess_media_type(content_type: str, url: str) -> str:
 
     return "image/jpeg"
 
-# pylint: disable=too-many-locals
+
 def upload_image_from_url_v2(image_url: str, access_token: str) -> str:
     """Upload an image (by URL) using X API v2 chunked media upload."""
     dl = requests.get(image_url, timeout=30)
