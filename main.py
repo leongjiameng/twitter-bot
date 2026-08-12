@@ -3,7 +3,8 @@ X OAuth Tester (Flask)
 
 - OAuth2 Authorization Code + PKCE
 - Token persistence: Redis (optional) or token.json
-- Auto refresh + manual refresh button
+- Supports automatic refresh for browser-authorized tokens
+- Imported tokens can be access-token-only
 - Post tweet (text)
 - Post tweet with media (X API v2 chunked upload: INIT/APPEND/FINALIZE)
 - Verbose HTTP logging (toggle PRINT_SECRETS=1)
@@ -40,15 +41,25 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-change-me")
 
 CLIENT_ID = os.environ["CLIENT_ID"]
-CLIENT_SECRET = os.environ["CLIENT_SECRET"]
+# Public clients do not have a client secret and authenticate with PKCE only.
+# Confidential clients should set CLIENT_SECRET and use HTTP Basic auth below.
+CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "").strip()
+OAUTH_CLIENT_TYPE = os.environ.get(
+    "OAUTH_CLIENT_TYPE", "confidential" if CLIENT_SECRET else "public"
+).strip().lower()
+if OAUTH_CLIENT_TYPE not in {"public", "confidential"}:
+    raise RuntimeError("OAUTH_CLIENT_TYPE must be 'public' or 'confidential'")
+if OAUTH_CLIENT_TYPE == "confidential" and not CLIENT_SECRET:
+    raise RuntimeError("CLIENT_SECRET is required for a confidential client")
 REDIRECT_URI = os.environ["REDIRECT_URI"]
 
 REDIS_URL = os.environ.get("REDIS_URL_DOGS")  # optional
 TOKEN_FILE = os.environ.get("TOKEN_FILE", "token.json")
 
 AUTH_URL = "https://twitter.com/i/oauth2/authorize"
-TOKEN_URL = "https://api.twitter.com/2/oauth2/token"
+TOKEN_URL = "https://api.x.com/2/oauth2/token"
 TWEET_URL = "https://api.twitter.com/2/tweets"
+USER_ME_URL = "https://api.x.com/2/users/me"
 
 # X API v2 media upload (chunked) - dedicated endpoints
 MEDIA_INIT_URL = "https://api.x.com/2/media/upload/initialize"
@@ -111,11 +122,22 @@ INDEX_HTML = """<!doctype html>
       <button onclick="location.href='/authorize'">Authorize / Re-authorize</button>
       <button onclick="refreshToken()">Refresh access token</button>
       <button onclick="showToken()">Show stored token</button>
+      <button onclick="getMe()">Call /2/users/me</button>
       <button onclick="clearToken()">Clear token</button>
     </div>
     <div class="row hint">
-      Tip: Once authorized, the app will auto-refresh access tokens using refresh_token.
+      Tip: Imported tokens use the access token as-is; browser-authorized tokens can auto-refresh.
     </div>
+  </div>
+
+  <div class="card">
+    <h3>Delete all posts</h3>
+    <div class="row hint">This includes replies. Reposts are not handled.</div>
+    <div class="row">
+      <button onclick="previewAllPosts()">Preview my posts</button>
+      <button id="deleteAllButton" onclick="deleteAllPosts()" disabled>Delete previewed posts</button>
+    </div>
+    <div id="deletePreview" class="mono"></div>
   </div>
 
   <div class="card">
@@ -216,8 +238,46 @@ async function showToken(){
   return run('Fetching token...', () => fetch('/token', { method: 'GET' }));
 }
 
+async function getMe(){
+  return run('Calling /2/users/me...', () => fetch('/me', { method: 'GET' }));
+}
+
+async function refreshToken(){
+  return run('Refreshing access token...', () => fetch('/refresh', { method: 'POST' }));
+}
+
 async function clearToken(){
   return run('Clearing token...', () => fetch('/logout', { method: 'POST' }));
+}
+
+async function deleteAllPosts(){
+  if (!window.previewedPostCount) {
+    out('Preview the posts first.');
+    return;
+  }
+  if (!confirm('Delete every post and reply from the logged-in account? This cannot be undone.')) {
+    return;
+  }
+  return run('Deleting all posts...', () => fetch('/delete-all-posts', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({confirm: 'DELETE'})
+  }));
+}
+
+async function previewAllPosts(){
+  return run('Loading posts for preview...', async () => {
+    const res = await fetch('/delete-all-posts/preview', {method: 'GET'});
+    if (res.ok) {
+      const body = await res.clone().json();
+      window.previewedPostCount = body.posts.length;
+      document.getElementById('deleteAllButton').disabled = !body.posts.length;
+      document.getElementById('deletePreview').textContent = body.posts.length
+        ? body.posts.map(p => `${p.id}  ${p.created_at || ''}  ${p.text}`).join('\\n')
+        : 'No posts found.';
+    }
+    return res;
+  });
 }
 
 async function postText(){
@@ -239,9 +299,6 @@ async function postMedia(){
   }));
 }
 
-async function refreshToken(){
-  return run('Refreshing access token...', () => fetch('/refresh', { method: 'POST' }));
-}
 </script>
 </body>
 </html>
@@ -256,15 +313,18 @@ def _redact(text: str) -> str:
     if PRINT_SECRETS:
         return text
 
+    # Headers are logged as JSON, so support both JSON keys and plain text.
     text = re.sub(
-        r"(Authorization:\s*Basic\s+)[A-Za-z0-9+/=]+",
-        r"\1***REDACTED***",
+        r'("?Authorization"?\s*:\s*"?Basic\s+)[A-Za-z0-9+/=]+("?)',
+        r"\1***REDACTED***\2",
         text,
+        flags=re.IGNORECASE,
     )
     text = re.sub(
-        r"(Authorization:\s*Bearer\s+)[A-Za-z0-9\-_\.]+",
-        r"\1***REDACTED***",
+        r'("?Authorization"?\s*:\s*"?Bearer\s+)[A-Za-z0-9\-_\.]+("?)',
+        r"\1***REDACTED***\2",
         text,
+        flags=re.IGNORECASE,
     )
     text = re.sub(r'("access_token"\s*:\s*")[^"]+(")', r"\1***REDACTED***\2", text)
     text = re.sub(r'("refresh_token"\s*:\s*")[^"]+(")', r"\1***REDACTED***\2", text)
@@ -327,6 +387,41 @@ def save_token(token: dict) -> None:
         json.dump(token, f, indent=2)
 
 
+def configure_user_token(token_data: dict[str, Any]) -> dict[str, Any]:
+    """Import an existing OAuth token payload and make it the active token.
+
+    The payload may contain string values, as commonly returned by secret
+    stores or templating systems. Imported tokens are marked access-token-only;
+    any refresh_token is preserved but never used by API calls. client_id and
+    redirect_uri are also accepted and preserved.
+    """
+    if not isinstance(token_data, dict):
+        raise TypeError("token_data must be a dictionary")
+
+    access_token = str(token_data.get("access_token", "")).strip()
+    if not access_token or access_token.startswith("{{"):
+        raise ValueError("token_data must contain a real access_token")
+
+    normalized = dict(token_data)
+    normalized["refresh_enabled"] = False
+    normalized["access_token"] = access_token
+    if token_data.get("refresh_token"):
+        normalized["refresh_token"] = str(token_data["refresh_token"]).strip()
+
+    if token_data.get("expires_at") is not None:
+        try:
+            normalized["expires_at"] = int(float(token_data["expires_at"]))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("expires_at must be a Unix timestamp") from exc
+
+    scopes = token_data.get("scopes")
+    if isinstance(scopes, str):
+        normalized["scopes"] = scopes.split()
+
+    save_token(normalized)
+    return normalized
+
+
 def clear_token() -> None:
     """Clear stored token."""
     if r is not None:
@@ -374,24 +469,33 @@ def build_authorize_url(code_challenge: str) -> tuple[str, str]:
     return f"{AUTH_URL}?{urlencode(params)}", state
 
 
-def basic_auth_header() -> str:
-    """Build Basic auth header for token endpoint."""
-    raw = f"{CLIENT_ID}:{CLIENT_SECRET}".encode("utf-8")
-    return "Basic " + base64.b64encode(raw).decode("utf-8")
+def token_request_auth() -> tuple[dict[str, str], dict[str, str]]:
+    """Return token headers and form fields for public/confidential clients."""
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    form = {"client_id": CLIENT_ID}
+
+    if OAUTH_CLIENT_TYPE == "confidential":
+        # requests handles RFC 7617 encoding and ensures the Authorization
+        # header is attached to the actual request sent to X.
+        headers["Authorization"] = requests.auth._basic_auth_str(
+            CLIENT_ID, CLIENT_SECRET
+        )
+        # X's confidential-client example authenticates the client in Basic
+        # auth; do not send client_id a second time in the form body.
+        form.pop("client_id")
+
+    return headers, form
 
 
 def exchange_code_for_token(code: str, code_verifier: str) -> dict:
     """Exchange auth code for access/refresh token."""
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Authorization": basic_auth_header(),
-    }
+    headers, form = token_request_auth()
     form = {
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": REDIRECT_URI,
         "code_verifier": code_verifier,
-        "client_id": CLIENT_ID,
+        **form,
     }
 
     log_http(
@@ -413,65 +517,75 @@ def exchange_code_for_token(code: str, code_verifier: str) -> dict:
         body=json.dumps(data, indent=2),
     )
 
-    resp.raise_for_status()
+    if not resp.ok:
+        detail = data.get("error_description") or data.get("error") or resp.text
+        raise requests.HTTPError(
+            f"X token exchange failed ({resp.status_code}): {detail}",
+            response=resp,
+        )
 
     expires_in = int(data.get("expires_in", 0))
     data["expires_at"] = int(time.time()) + max(expires_in - 60, 0)
+    data["refresh_enabled"] = True
     return data
 
 
-def refresh_access_token(refresh_token: str) -> dict:
-    """Refresh access token using refresh_token."""
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Authorization": basic_auth_header(),
-    }
-    form = {
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "client_id": CLIENT_ID,
-    }
-
-    log_http(
-        "TOKEN REFRESH REQUEST",
-        "POST",
-        TOKEN_URL,
-        headers=headers,
-        body=urlencode(form),
-    )
+def refresh_access_token(refresh_token: str) -> dict[str, Any]:
+    """Refresh a browser-authorized token."""
+    headers, form = token_request_auth()
+    form = {"grant_type": "refresh_token", "refresh_token": refresh_token, **form}
+    log_http("TOKEN REFRESH REQUEST", "POST", TOKEN_URL, headers=headers, body=urlencode(form))
 
     resp = requests.post(TOKEN_URL, headers=headers, data=form, timeout=20)
     data = safe_json(resp)
-
     log_http(
-        "TOKEN REFRESH RESPONSE",
-        "RESPONSE",
-        str(resp.status_code),
-        headers=dict(resp.headers),
-        body=json.dumps(data, indent=2),
+        "TOKEN REFRESH RESPONSE", "RESPONSE", str(resp.status_code),
+        headers=dict(resp.headers), body=json.dumps(data, indent=2),
     )
-
-    resp.raise_for_status()
+    if not resp.ok:
+        detail = data.get("error_description") or data.get("error") or resp.text
+        raise requests.HTTPError(
+            f"X token refresh failed ({resp.status_code}): {detail}", response=resp
+        )
 
     expires_in = int(data.get("expires_in", 0))
     data["expires_at"] = int(time.time()) + max(expires_in - 60, 0)
+    data["refresh_enabled"] = True
     return data
 
 
 def get_access_token_or_refresh() -> str:
-    """Return valid access token; refresh if needed; otherwise error."""
+    """Use an imported token as-is; refresh browser-authorized tokens."""
     token = load_token()
-    if token and token_is_valid(token):
-        return token["access_token"]
+    if not token or not token.get("access_token"):
+        raise RuntimeError("No access_token stored. Import or authorize a token first.")
 
-    if token and token.get("refresh_token"):
+    if token.get("refresh_enabled", True) and not token_is_valid(token):
+        if not token.get("refresh_token"):
+            raise RuntimeError("Access token expired and no refresh_token is available.")
         new_token = refresh_access_token(token["refresh_token"])
         if "refresh_token" not in new_token:
             new_token["refresh_token"] = token["refresh_token"]
         save_token(new_token)
         return new_token["access_token"]
 
-    raise RuntimeError("No valid token stored. Click Authorize first.")
+    return token["access_token"]
+
+
+def get_authenticated_user(access_token: str) -> requests.Response:
+    """Fetch the authenticated user's profile using the OAuth user token."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    log_http("ME REQUEST", "GET", USER_ME_URL, headers=headers)
+    resp = requests.get(USER_ME_URL, headers=headers, timeout=20)
+    log_http(
+        "ME RESPONSE",
+        "RESPONSE",
+        str(resp.status_code),
+        headers=dict(resp.headers),
+        body=json.dumps(safe_json(resp), indent=2),
+    )
+    return resp
 
 
 # =========================
@@ -690,7 +804,11 @@ def oauth_callback() -> Response:
     if not code_verifier:
         return jsonify({"error": "Missing code_verifier"}), 400
 
-    token = exchange_code_for_token(code, code_verifier)
+    try:
+        token = exchange_code_for_token(code, code_verifier)
+    except requests.HTTPError as exc:
+        # Do not turn a provider error into an opaque Flask 500 page.
+        return jsonify({"error": "oauth_token_exchange_failed", "detail": str(exc)}), 502
     save_token(token)
     return redirect("/")
 
@@ -712,38 +830,33 @@ def show_token() -> Response:
 
 @app.post("/refresh")
 def force_refresh() -> Response:
-    """Force refresh using stored refresh_token."""
+    """Manually refresh a browser-authorized token."""
     tok = load_token()
     if not tok or not tok.get("refresh_token"):
-        return (
-            jsonify({"error": "No refresh_token stored. Click Authorize first."}),
-            400,
-        )
+        return jsonify({"error": "No refresh_token stored. Authorize first."}), 400
+    if tok.get("refresh_enabled") is False:
+        return jsonify({
+            "error": "refresh_disabled",
+            "detail": "Imported tokens are access-token-only; import a new access token instead.",
+        }), 400
 
     try:
         new_token = refresh_access_token(tok["refresh_token"])
         if "refresh_token" not in new_token:
             new_token["refresh_token"] = tok["refresh_token"]
         save_token(new_token)
-    except requests.HTTPError as e:
-        resp = e.response
-        return (
-            jsonify(
-                {
-                    "error": "token_refresh_failed",
-                    "status": resp.status_code if resp is not None else None,
-                    "headers": dict(resp.headers) if resp is not None else None,
-                    "body": safe_json(resp) if resp is not None else None,
-                }
-            ),
-            400,
-        )
+    except requests.HTTPError as exc:
+        resp = exc.response
+        return jsonify({
+            "error": "token_refresh_failed",
+            "status": resp.status_code if resp is not None else None,
+            "body": safe_json(resp) if resp is not None else None,
+        }), 400
 
     safe = dict(new_token)
     if not PRINT_SECRETS:
-        safe["access_token"] = "***REDACTED***" if "access_token" in safe else None
-        safe["refresh_token"] = "***REDACTED***" if "refresh_token" in safe else None
-
+        safe["access_token"] = "***REDACTED***"
+        safe["refresh_token"] = "***REDACTED***"
     return jsonify({"ok": True, "token": safe})
 
 
@@ -752,6 +865,81 @@ def logout() -> Response:
     """Clear stored token."""
     clear_token()
     return jsonify({"ok": True})
+
+
+@app.post("/delete-all-posts")
+def delete_all_posts_route() -> Response:
+    """Delete every post and reply belonging to the authenticated account."""
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") != "DELETE":
+        return jsonify({
+            "error": "confirmation_required",
+            "detail": 'Send {"confirm": "DELETE"} to confirm deletion.',
+        }), 400
+
+    try:
+        access = get_access_token_or_refresh()
+        me_response = get_authenticated_user(access)
+        if not me_response.ok:
+            return jsonify({"error": "could_not_identify_user", "body": safe_json(me_response)}), 400
+
+        user = safe_json(me_response).get("data") or {}
+        user_id = user.get("id")
+        if not user_id:
+            return jsonify({"error": "users_me_missing_id", "body": user}), 400
+
+        # Imported here to keep the command-line utility reusable without
+        # creating an import cycle while main.py is being loaded.
+        from delete_all_posts import delete_posts_for_user
+
+        rate_limit_events: list[str] = []
+        result = delete_posts_for_user(user_id, access, rate_limit_events=rate_limit_events)
+        return jsonify({
+            "ok": not result["failed"],
+            "username": user.get("username"),
+            "rate_limit_events": rate_limit_events,
+            **result,
+        }), 200 if not result["failed"] else 207
+    except (RuntimeError, requests.RequestException) as exc:
+        return jsonify({"error": "delete_all_posts_failed", "detail": str(exc)}), 502
+
+
+@app.get("/delete-all-posts/preview")
+def preview_all_posts_route() -> Response:
+    """List the authenticated user's posts without changing anything."""
+    try:
+        access = get_access_token_or_refresh()
+        me_response = get_authenticated_user(access)
+        if not me_response.ok:
+            return jsonify({"error": "could_not_identify_user", "body": safe_json(me_response)}), 400
+        user = safe_json(me_response).get("data") or {}
+        user_id = user.get("id")
+        if not user_id:
+            return jsonify({"error": "users_me_missing_id", "body": user}), 400
+
+        from delete_all_posts import iter_user_posts
+
+        rate_limit_events: list[str] = []
+        posts = list(iter_user_posts(user_id, access, rate_limit_events=rate_limit_events))
+        return jsonify({
+            "username": user.get("username"),
+            "posts": posts,
+            "rate_limit_events": rate_limit_events,
+        })
+    except (RuntimeError, requests.RequestException) as exc:
+        return jsonify({"error": "preview_failed", "detail": str(exc)}), 502
+
+
+@app.get("/me")
+def authenticated_user() -> Response:
+    """Return the X account associated with the stored OAuth token."""
+    try:
+        access = get_access_token_or_refresh()
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    resp = get_authenticated_user(access)
+    return jsonify(safe_json(resp)), resp.status_code
 
 
 @app.post("/tweet")

@@ -4,7 +4,7 @@ A Flask-based web application that allows you to authenticate with X (formerly T
 
 ## Features
 
-- **X OAuth2 Authentication**: Secure login flow with automatic token refresh using refresh tokens
+- **X OAuth2 Authentication**: Secure login flow with automatic token refresh
 - **Post Text Tweets**: Send simple text tweets via an intuitive web interface
 - **Post Media Tweets**: Upload images and post tweets with media attachments
 - **Token Management**: Store tokens locally or in Redis for persistent authentication
@@ -50,6 +50,9 @@ A Flask-based web application that allows you to authenticate with X (formerly T
 
    ```env
    CLIENT_ID=your_x_api_client_id
+   # Set to public for Native/Single Page apps, confidential for Web/Automated apps
+   OAUTH_CLIENT_TYPE=confidential
+   # Required only when OAUTH_CLIENT_TYPE=confidential; use the OAuth 2.0 Client Secret
    CLIENT_SECRET=your_x_api_client_secret
    REDIRECT_URI=http://127.0.0.1:5000/oauth/callback
    FLASK_SECRET_KEY=your-secret-key-for-sessions
@@ -60,7 +63,7 @@ A Flask-based web application that allows you to authenticate with X (formerly T
    # Optional: Local token file (used when REDIS_URL_DOGS is not set)
    TOKEN_FILE=token.json
 
-   # Optional: Set to "1" to print secrets in logs (dev only)
+   # Optional: Set to "1" to print secrets in logs (strongly discouraged)
    PRINT_SECRETS=0
    ```
 2. **Get X API Credentials**:
@@ -72,7 +75,6 @@ A Flask-based web application that allows you to authenticate with X (formerly T
      - `tweet.read`
      - `tweet.write`
      - `users.read`
-     - `offline.access`
      - `media.write`
 
 ## Usage
@@ -143,8 +145,32 @@ docker compose down
 5. **Manage Tokens**
 
    - Click "Show stored token" to view current access token
-   - Click "Refresh access token" to refresh the access token
+   - Click "Refresh access token" to refresh a browser-authorized token
    - Click "Clear token" to logout and remove stored credentials
+
+### Delete all posts
+
+`delete_all_posts.py` uses the stored OAuth token, verifies the account through
+`/2/users/me`, lists that account's posts, and deletes them through the X API.
+Replies are included; reposts are a separate action and are not handled.
+
+Preview first:
+
+```bash
+python delete_all_posts.py
+```
+
+To actually delete the previewed posts:
+
+```bash
+python delete_all_posts.py --yes
+```
+
+For a small test run, use `--limit 5 --yes`.
+
+The preview/deletion requests wait 4 seconds before each API call by default.
+To change that delay, set `DELETE_API_DELAY_SECONDS` in `.env`, for example
+`DELETE_API_DELAY_SECONDS=6`. Set it to `0` to disable the delay.
 
 ## API Endpoints
 
@@ -152,8 +178,10 @@ docker compose down
 - `GET /authorize` - Start OAuth2 authorization flow
 - `GET /oauth/callback` - OAuth2 callback endpoint (handled automatically)
 - `GET /token` - Retrieve stored token (JSON)
-- `POST /refresh` - Force refresh access token
+- `POST /refresh` - Force refresh a browser-authorized token
 - `POST /logout` - Clear stored token
+- `POST /delete-all-posts` - Delete all posts and replies for the authenticated user
+- `GET /delete-all-posts/preview` - Preview posts before deletion
 - `POST /tweet` - Post a text tweet
   - Body: `{"text": "your tweet text"}`
 - `POST /tweet-media` - Post tweet with media
@@ -166,14 +194,39 @@ The app supports two token storage methods:
 1. **Local File** (default): Stores tokens in `token.json`
 2. **Redis**: If `REDIS_URL_DOGS` is set, tokens are stored in Redis
 
-Tokens are automatically refreshed using the refresh token, keeping you logged in.
+Browser-authorized tokens are automatically refreshed using the refresh token.
+Tokens imported with `configure_user_token` are marked access-token-only and are
+never refreshed; import a new access token when one expires.
+
+### Import an existing token
+
+If you already have an OAuth token payload, import it from Python instead of
+running the browser authorization flow:
+
+```python
+from main import configure_user_token
+
+configure_user_token({
+    "client_id": "your_oauth2_client_id",
+    "redirect_uri": "https://example.com/access-token",
+    "access_token": "your_access_token",
+    "refresh_token": "your_refresh_token",
+    "expires_at": "1786099703",
+    "scopes": "tweet.write media.write users.read tweet.read",
+    "token_type": "bearer",
+})
+```
+
+The function converts `expires_at` to an integer and splits the space-separated
+scope string. The access token must be a real value, not a template placeholder
+such as `{{token}}`. Any supplied refresh token is preserved but not used by
+the imported-token flow.
 
 ## Troubleshooting
 
-- **"Missing required environment variables"**: Ensure all required `.env` variables are set (CLIENT_ID, CLIENT_SECRET, REDIRECT_URI)
+- **"Missing valid authorization header"**: Set `OAUTH_CLIENT_TYPE=public` and remove `CLIENT_SECRET` for a Native/Single Page app. For a Web/Automated app, set `OAUTH_CLIENT_TYPE=confidential` and use its OAuth 2.0 Client Secret (not the API key secret), then authorize again.
 - **Redis connection errors**: Either start Redis (see above) or unset `REDIS_URL_DOGS` to fall back to `token.json`
 - **Media upload fails with 4xx error**: Check that your X app has `media.write` permission in OAuth2 scopes
-- **Token refresh issues**: Ensure `offline.access` scope is enabled in your X app settings
 - **CORS or Redirect URI mismatch**: Verify your `REDIRECT_URI` matches exactly in `.env` and X Developer Portal settings
 
 ## Development
