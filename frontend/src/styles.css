@@ -1,0 +1,23 @@
+:root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #17202a; background: #f4f7f9; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 980px; margin: 0 auto; padding: 32px 20px 64px; }
+header { display: flex; justify-content: space-between; align-items: end; margin-bottom: 24px; }
+h1, h2, p { margin-top: 0; }
+h1 { font-size: clamp(2rem, 5vw, 3.4rem); letter-spacing: -0.05em; margin-bottom: 0; }
+h2 { font-size: 1.1rem; }
+.eyebrow { color: #1d9bf0; font-weight: 700; margin-bottom: 8px; }
+.card { background: white; border: 1px solid #dce3e8; border-radius: 16px; padding: 20px; margin: 16px 0; box-shadow: 0 4px 18px #17202a0a; }
+.danger-card { border-color: #f1b8b8; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; }
+button { border: 0; border-radius: 999px; background: #17202a; color: white; padding: 10px 16px; cursor: pointer; font-weight: 650; }
+button:hover { background: #1d9bf0; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.danger { background: #d92d20; }
+textarea { display: block; width: 100%; border: 1px solid #cbd5dc; border-radius: 10px; padding: 12px; margin-bottom: 12px; font: inherit; resize: vertical; }
+.preview { margin-top: 18px; max-height: 360px; overflow: auto; border-top: 1px solid #e5eaee; }
+.post { padding: 10px 0; border-bottom: 1px solid #eef1f3; line-height: 1.4; }
+code { color: #667085; font-size: .8rem; }
+.job-state { margin: 16px 0 0; color: #667085; }
+.output-card { background: #111827; color: #d1fae5; }
+pre { white-space: pre-wrap; min-height: 90px; margin: 0; font: .88rem/1.55 ui-monospace, SFMono-Regular, monospace; }

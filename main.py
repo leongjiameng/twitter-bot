@@ -17,7 +17,9 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
+import uuid
 from datetime import datetime
 from typing import Any, Optional
 from urllib.parse import urlencode
@@ -52,6 +54,7 @@ if OAUTH_CLIENT_TYPE not in {"public", "confidential"}:
 if OAUTH_CLIENT_TYPE == "confidential" and not CLIENT_SECRET:
     raise RuntimeError("CLIENT_SECRET is required for a confidential client")
 REDIRECT_URI = os.environ["REDIRECT_URI"]
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "").strip()
 
 REDIS_URL = os.environ.get("REDIS_URL_DOGS")  # optional
 TOKEN_FILE = os.environ.get("TOKEN_FILE", "token.json")
@@ -80,6 +83,11 @@ REDIS_KEY = "x_oauth_token_v1"
 r: Optional[Any] = None
 if REDIS_URL and redis_lib is not None:
     r = redis_lib.from_url(REDIS_URL)
+
+# In-process jobs are sufficient for this single-process local app. If the app
+# is later deployed with multiple workers, move this state to Redis/Celery.
+DELETE_JOBS: dict[str, dict[str, Any]] = {}
+DELETE_JOBS_LOCK = threading.Lock()
 
 
 # =========================
@@ -258,11 +266,46 @@ async function deleteAllPosts(){
   if (!confirm('Delete every post and reply from the logged-in account? This cannot be undone.')) {
     return;
   }
-  return run('Deleting all posts...', () => fetch('/delete-all-posts', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({confirm: 'DELETE'})
-  }));
+  const button = document.getElementById('deleteAllButton');
+  button.disabled = true;
+  try {
+    const start = await fetch('/api/delete/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({confirm: 'DELETE'})
+    });
+    const startBody = await start.json();
+    if (!start.ok) {
+      out(JSON.stringify(startBody, null, 2));
+      button.disabled = false;
+      return;
+    }
+    await pollDeleteJob(startBody.job_id);
+  } catch (e) {
+    out(String(e && e.stack ? e.stack : e));
+    button.disabled = false;
+  }
+}
+
+async function pollDeleteJob(jobId){
+  while (true) {
+    const res = await fetch('/api/delete/status/' + encodeURIComponent(jobId));
+    const job = await res.json();
+    if (!res.ok) {
+      out(JSON.stringify(job, null, 2));
+      return;
+    }
+    const progress = job.total
+      ? `${job.processed}/${job.total}` : `${job.processed}`;
+    const events = (job.events || []).slice(-8).join('\\n');
+    out(`${job.message || job.status}\\nProgress: ${progress}\\nDeleted: ${job.deleted}\\nFailed: ${job.failed}\\n\\n${events}`);
+    if (job.status === 'completed' || job.status === 'failed') {
+      window.previewedPostCount = 0;
+      document.getElementById('deletePreview').textContent = '';
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
 }
 
 async function previewAllPosts(){
@@ -810,7 +853,7 @@ def oauth_callback() -> Response:
         # Do not turn a provider error into an opaque Flask 500 page.
         return jsonify({"error": "oauth_token_exchange_failed", "detail": str(exc)}), 502
     save_token(token)
-    return redirect("/")
+    return redirect(FRONTEND_URL or "/")
 
 
 @app.get("/token")
@@ -902,6 +945,96 @@ def delete_all_posts_route() -> Response:
         }), 200 if not result["failed"] else 207
     except (RuntimeError, requests.RequestException) as exc:
         return jsonify({"error": "delete_all_posts_failed", "detail": str(exc)}), 502
+
+
+def _set_delete_job(job_id: str, **updates: Any) -> None:
+    with DELETE_JOBS_LOCK:
+        DELETE_JOBS[job_id].update(updates)
+
+
+def _run_delete_job(job_id: str, user: dict[str, Any], access: str) -> None:
+    """Run deletion in a background thread and publish progress for polling."""
+    try:
+        from delete_all_posts import delete_post, iter_user_posts
+
+        events: list[str] = []
+        posts = list(iter_user_posts(user["id"], access, rate_limit_events=events))
+        _set_delete_job(job_id, total=len(posts), message=f"Found {len(posts)} posts")
+
+        deleted = failed = 0
+        for index, post in enumerate(posts, start=1):
+            before = len(events)
+            response = delete_post(post["id"], access, events)
+            if response.ok and (safe_json(response).get("data") or {}).get("deleted") is True:
+                deleted += 1
+            else:
+                failed += 1
+            new_events = events[before:]
+            _set_delete_job(
+                job_id,
+                processed=index,
+                deleted=deleted,
+                failed=failed,
+                events=events[-30:],
+                message=(
+                    f"Processed {index}/{len(posts)}"
+                    + (f" ({new_events[-1]})" if new_events else "")
+                ),
+            )
+
+        _set_delete_job(
+            job_id,
+            status="completed",
+            message=f"Finished: {deleted} deleted, {failed} failed",
+            events=events[-30:],
+        )
+    except Exception as exc:  # Keep worker errors visible through the API.
+        _set_delete_job(job_id, status="failed", message=str(exc), error=str(exc))
+
+
+@app.post("/api/delete/start")
+def start_delete_job() -> Response:
+    """Validate the account and start an asynchronous deletion job."""
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") != "DELETE":
+        return jsonify({"error": "confirmation_required"}), 400
+
+    try:
+        access = get_access_token_or_refresh()
+        me_response = get_authenticated_user(access)
+        if not me_response.ok:
+            return jsonify({"error": "could_not_identify_user", "body": safe_json(me_response)}), 400
+        user = safe_json(me_response).get("data") or {}
+        if not user.get("id"):
+            return jsonify({"error": "users_me_missing_id", "body": user}), 400
+
+        job_id = uuid.uuid4().hex
+        with DELETE_JOBS_LOCK:
+            DELETE_JOBS[job_id] = {
+                "status": "running",
+                "message": "Starting deletion job...",
+                "username": user.get("username"),
+                "processed": 0,
+                "total": None,
+                "deleted": 0,
+                "failed": 0,
+                "events": [],
+            }
+        threading.Thread(
+            target=_run_delete_job, args=(job_id, user, access), daemon=True
+        ).start()
+        return jsonify({"ok": True, "job_id": job_id}), 202
+    except (RuntimeError, requests.RequestException) as exc:
+        return jsonify({"error": "delete_start_failed", "detail": str(exc)}), 502
+
+
+@app.get("/api/delete/status/<job_id>")
+def delete_job_status(job_id: str) -> Response:
+    with DELETE_JOBS_LOCK:
+        job = DELETE_JOBS.get(job_id)
+        if job is None:
+            return jsonify({"error": "job_not_found"}), 404
+        return jsonify(dict(job))
 
 
 @app.get("/delete-all-posts/preview")

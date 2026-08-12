@@ -79,6 +79,28 @@ A Flask-based web application that allows you to authenticate with X (formerly T
 
 ## Usage
 
+### React frontend (recommended for local development)
+
+The Flask app remains the backend and owns OAuth credentials, tokens, X API
+calls, and deletion jobs. The React/Vite app in `frontend/` is the separate UI.
+
+In one terminal:
+
+```bash
+source venv/bin/activate
+python main.py
+```
+
+In another terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://127.0.0.1:5173`. Vite proxies API requests to Flask on port 5000.
+
 ### Starting Redis (optional)
 
 Redis is only required if you set `REDIS_URL_DOGS`. Otherwise the app stores tokens in `token.json`.
@@ -182,6 +204,8 @@ To change that delay, set `DELETE_API_DELAY_SECONDS` in `.env`, for example
 - `POST /logout` - Clear stored token
 - `POST /delete-all-posts` - Delete all posts and replies for the authenticated user
 - `GET /delete-all-posts/preview` - Preview posts before deletion
+- `POST /api/delete/start` - Start an asynchronous deletion job
+- `GET /api/delete/status/<job_id>` - Read deletion job progress
 - `POST /tweet` - Post a text tweet
   - Body: `{"text": "your tweet text"}`
 - `POST /tweet-media` - Post tweet with media
